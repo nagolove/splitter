@@ -70,7 +70,7 @@ workspace "ray_example"
         }
     --]]
 
-    project "t80"
+    project "splitter"
         libdirs(caustic.libdirs)
         links({
             'raylib',

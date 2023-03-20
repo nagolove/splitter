@@ -20,6 +20,8 @@ static cpBool lastClickState = cpFalse;
 static cpVect sliceStart = {0.0, 0.0};
 static Font fnt = {0};
 static bool is_paused = false;
+static Shader shdr_mask = {0};
+static int loc_mask_tex = 0;
 
 #define GRABBABLE_MASK_BIT (1<<31)
 static cpShapeFilter GRAB_FILTER = {
@@ -51,7 +53,7 @@ struct Component_Body {
 };
 
 struct Component_Textured {
-    RenderTexture2D tex;
+    RenderTexture2D tex, mask;
 };
 
 static void _init(Stage_Splitter *st);
@@ -63,10 +65,13 @@ static de_cp_type comp_body = {
     .name = "body",
 };
 
+void on_destroy_textured(void *payload, de_entity e);
+
 static de_cp_type comp_textured = {
     .cp_id = 2,
     .cp_sizeof = sizeof(struct Component_Textured),
     .name = "textured",
+    .on_destroy = on_destroy_textured,
 };
 
 static inline void *entt2ptr(de_entity e) {
@@ -81,22 +86,19 @@ static void create_poly(
     de_entity e,
     cpSpace *space, de_ecs *r, 
     cpVect *verts, int vertsnum, 
-    cpTransform transform,
-    cpVect *centroid
+    cpTransform transform
+    //cpVect *centroid
 ) {
     assert(space);
     assert(verts);
     assert(r);
     assert(de_valid(r, e));
     struct Component_Body *b = de_emplace(r, e, comp_body);
-    //cpVect center = { 300, 300};
-    cpVect offset = cpvzero;
-    const float radius = 0.;
 
     cpFloat mass = cpAreaForPoly(vertsnum, verts, 0.0f) * DENSITY;
     trace("create_poly: mass %f\n", mass);
-    cpVect _centroid = centroid ? cpvneg(*centroid) : cpvzero;
-    cpFloat moment = cpMomentForPoly(mass, vertsnum, verts, _centroid, 0.0f);
+    cpVect centroid = cpCentroidForPoly(vertsnum, verts);
+    cpFloat moment = cpMomentForPoly(mass, vertsnum, verts, centroid, 0.0f);
 
     b->b = cpBodyNew(mass, moment);
     b->b->userData = entt2ptr(e);
@@ -113,18 +115,55 @@ static void create_box(
     assert(r);
     float w = wh.x, h = wh.y;
     cpVect verts[4] = {
-        cpvsub(center, (cpVect) { -w / 2., h / 2.}),
-        cpvsub(center, (cpVect) { -w / 2., -h / 2.}),
-        cpvsub(center, (cpVect) { w / 2., -h / 2.}),
-        cpvsub(center, (cpVect) { w / 2., h / 2.}),
+        { -w / 2., h / 2.},
+        { -w / 2., -h / 2.},
+        { w / 2., -h / 2.},
+        { w / 2., h / 2.},
     };
     const int vertsnum = sizeof(verts) / sizeof(verts[0]);
-    cpVect centroid = cpCentroidForPoly(vertsnum, verts);
-    create_poly(e, space, r, verts, vertsnum, cpTransformIdentity, &centroid);
+    create_poly(e, space, r, verts, vertsnum, cpTransformIdentity);
+    struct Component_Body *b = de_get(r, e, comp_body);
+    cpBodySetPosition(b->b, center);
 }
 
+static void iter_shape_contor(cpBody *body, cpShape *shape, void *data) {
+    Vector2 tri_strip[250] = {0};
+    int num = cpPolyShapeGetCount(shape);
 
-static void ClipPoly(cpSpace *space, cpShape *shape, cpVect n, cpFloat dist) {
+    assert(num < (sizeof(tri_strip) / sizeof(Vector2)));
+    if (num >= (sizeof(tri_strip) / sizeof(Vector2)))
+        return;
+
+    int j = 0, i = 1;
+
+    while (i < num) {
+        tri_strip[j++] = from_Vect(
+            cpBodyLocalToWorld(body, cpPolyShapeGetVert(shape, 0)));
+        tri_strip[j++] = from_Vect(
+            cpBodyLocalToWorld(body, cpPolyShapeGetVert(shape, i)));
+        if (i + 1 < num)
+            tri_strip[j++] = from_Vect(cpBodyLocalToWorld(
+                body ,cpPolyShapeGetVert(shape, i + 1)
+            ));
+        i++;
+    }
+
+    DrawTriangleStrip(tri_strip, j - 1, GREEN);
+}
+
+static void render_countour(RenderTexture2D *target, cpBody *b, Camera2D cam) {
+    assert(b);
+    assert(target);
+
+    BeginTextureMode(*target);
+    BeginMode2D(cam);
+    ClearBackground(WHITE);
+    cpBodyEachShape(b, iter_shape_contor, NULL);
+    EndMode2D();
+    EndTextureMode();
+}
+
+static de_entity ClipPoly(cpSpace *space, cpShape *shape, cpVect n, cpFloat dist) {
     cpBody *body = cpShapeGetBody(shape);
     
     int count = cpPolyShapeGetCount(shape);
@@ -157,7 +196,7 @@ static void ClipPoly(cpSpace *space, cpShape *shape, cpVect n, cpFloat dist) {
     de_ecs *r = ((Stage_Splitter*)space->userData)->r;
     cpTransform transform = cpTransformTranslate(cpvneg(centroid));
     de_entity e = de_create(r);
-    create_poly(e, space, r, clipped, clippedCount, transform, &centroid);
+    create_poly(e, space, r, clipped, clippedCount, transform);
     struct Component_Body* b = de_get(r, e, comp_body);
 
     cpBodySetPosition(b->b, centroid);
@@ -166,11 +205,13 @@ static void ClipPoly(cpSpace *space, cpShape *shape, cpVect n, cpFloat dist) {
    
     // Copy whatever properties you have set on the original shape that are important
     cpShapeSetFriction(b->shape, cpShapeGetFriction(shape));
+    return e;
 }
 
 static void
 SliceShapePostStep(cpSpace *space, cpShape *shape, struct SliceContext *context)
 {
+    de_ecs *r = ((Stage_Splitter*)space->userData)->r;
 	cpVect a = context->a;
 	cpVect b = context->b;
 	
@@ -178,15 +219,28 @@ SliceShapePostStep(cpSpace *space, cpShape *shape, struct SliceContext *context)
 	cpVect n = cpvnormalize(cpvperp(cpvsub(b, a)));
 	cpFloat dist = cpvdot(a, n);
 	
-	ClipPoly(space, shape, n, dist);
-	ClipPoly(space, shape, cpvneg(n), -dist);
-	
+    de_entity e_new = de_null;
+
 	cpBody *body = cpShapeGetBody(shape);
+	e_new = ClipPoly(space, shape, n, dist);
+
+    e_new = ptr2entt(body->userData);
+    struct Component_Textured *t = de_try_get(r, e_new, comp_textured);
+    if (t) {
+        Camera2D cam_local = {0};
+        BeginTextureMode(t->tex);
+        BeginMode2D(cam_local);
+        DrawCircle(1, 1, 1000, YELLOW);
+        EndMode2D();
+        EndTextureMode();
+    }
+
+	e_new = ClipPoly(space, shape, cpvneg(n), -dist);
+	
     cpSpaceRemoveShape(space, shape);
     cpSpaceRemoveBody(space, body);
     cpShapeFree(shape);
 
-    de_ecs *r = ((Stage_Splitter*)space->userData)->r;
     if (body) {
         de_entity e = ptr2entt(body->userData);
         if (de_valid(r, e)) {
@@ -210,6 +264,10 @@ SliceQuery(cpShape *shape, cpVect point, cpVect normal, cpFloat alpha, struct Sl
         context->b
     );
     */
+
+    if (shape->klass->type != CP_POLY_SHAPE) {
+        return;
+    }
 
 	// Check that the slice was complete by checking that the endpoints aren't in the sliced shape.
 	if(cpShapePointQuery(shape, a, NULL) > 0.0f && cpShapePointQuery(shape, b, NULL) > 0.0f){
@@ -285,7 +343,9 @@ de_entity create_char(
     e = de_create(r);
 
     struct Component_Textured *t = de_emplace(r, e, comp_textured);
+
     t->tex = bake_string(input, fnt.baseSize);
+    t->mask = LoadRenderTexture(t->tex.texture.width, t->tex.texture.height);
     cpVect sz = { t->tex.texture.width, t->tex.texture.height };
     create_box(e, space, r, from_Vector2(pos), sz); 
     return e;
@@ -315,7 +375,11 @@ static void splitter_init(Stage_Splitter *st) {
     trace("splitter_init:\n");
 
     fnt = load_font_unicode("assets/fonts/VictorMono-Medium.ttf", 455);
+    shdr_mask = LoadShader(NULL, "assets/vertex/100_fragment_stencil.glsl");
+    loc_mask_tex = GetShaderLocation(shdr_mask, "mask_texture");
+
     _init(st);
+
     /*
     e = de_create(st->r);
     create_box(e, st->space, st->r, (cpVect) { 600., -100. });
@@ -358,9 +422,10 @@ void splitter_shutdown(Stage_Splitter *st) {
     _shutdown(st);
 
     UnloadFont(fnt);
+    UnloadShader(shdr_mask);
 }
 
-void draw_chars(de_ecs *r) {
+void draw_chars(de_ecs *r, de_entity *ennts, int entts_num) {
     de_view view = de_create_view(
         r, 2, (de_cp_type[2]) { comp_body, comp_textured }
     );
@@ -384,6 +449,8 @@ void draw_chars(de_ecs *r) {
             t->tex.texture.height / 2.,
         };
 
+        SetShaderValueTexture(shdr_mask, loc_mask_tex, t->mask.texture);
+        BeginShaderMode(shdr_mask);
         DrawTexturePro(
             t->tex.texture,
             src,
@@ -392,9 +459,12 @@ void draw_chars(de_ecs *r) {
             RAD2DEG * b->b->a,
             WHITE
         );
+        EndShaderMode();
+        DrawCircle(b->b->p.x, b->b->p.y, 10, BLUE);
 
         de_view_next(&view);
     }
+
 }
 
 void splitter_draw(Stage_Splitter *st) {
@@ -403,7 +473,7 @@ void splitter_draw(Stage_Splitter *st) {
     ClearBackground(BLACK);
     BeginMode2D(cam);
 
-    draw_chars(st->r);
+    draw_chars(st->r, st->polygons, st->polygon_num);
 
     if (st->space)
         space_debug_draw(st->space, WHITE);
@@ -424,6 +494,18 @@ void splitter_draw(Stage_Splitter *st) {
 void splitter_reset(Stage_Splitter *st) {
     _shutdown(st);
     _init(st);
+}
+
+static void camera_process_mouse_wheel(Camera2D *cam) {
+    float wheel = GetMouseWheelMove();
+    if (wheel == 0.) 
+        return;
+    Vector2 mouse_world_pos = GetScreenToWorld2D(GetMousePosition(), *cam);
+    cam->offset = GetMousePosition();
+    cam->target = mouse_world_pos;
+    const float dzoom = 0.098;
+    cam->zoom += wheel * dzoom;
+    cam->zoom = cam->zoom < dzoom ? dzoom : cam->zoom;
 }
 
 void splitter_update(Stage_Splitter *st) {
@@ -454,17 +536,30 @@ void splitter_update(Stage_Splitter *st) {
     if (st->space && !is_paused)
         cpSpaceStep(st->space, 1. / 60);
     //cpSpaceStep(st->space, GetFrameTime());
+    
+    if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+        int ch = random() % 26;
+        char input[1] = {0};
+        input[0] = 'A' + ch;
+        //printf("%d %c", 
+                //(int)(' ' + 3),
+                //(int)(' ' + 3)
+                //);
+        create_char(st->space, st->r, input, GetMousePosition());
+    }
 
+    camera_process_mouse_wheel(&cam);
+    camera_process_mouse_drag(MOUSE_BUTTON_MIDDLE, &cam);
 
     // Annoying state tracking code that you wouldn't need
     // in a real event driven system.
     if(IsMouseButtonDown(MOUSE_BUTTON_LEFT) != lastClickState){
         if(IsMouseButtonDown(MOUSE_BUTTON_LEFT)){
-            // MouseDown
-            sliceStart = from_Vector2(GetMousePosition());
+            Vector2 world_pos = GetScreenToWorld2D(GetMousePosition(), cam);
+            sliceStart = from_Vector2(world_pos);
         } else {
-            // MouseUp
-            cpVect mouse_pos = from_Vector2(GetMousePosition());
+            Vector2 world_pos = GetScreenToWorld2D(GetMousePosition(), cam);
+            cpVect mouse_pos = from_Vector2(world_pos);
             struct SliceContext context = {sliceStart, mouse_pos, st->space};
             trace(
                 "splitter_update: from %s to %s\n",
@@ -511,4 +606,11 @@ int main(int argc, char **argv) {
     logger_shutdown();
     CloseWindow();
     return EXIT_SUCCESS;
+}
+
+void on_destroy_textured(void *payload, de_entity e) {
+    assert(payload);
+    struct Component_Textured *t = payload;
+    UnloadRenderTexture(t->tex);
+    UnloadRenderTexture(t->mask);
 }
