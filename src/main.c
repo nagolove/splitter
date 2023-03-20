@@ -14,6 +14,7 @@
 #include <stdlib.h>
 
 static Camera2D cam = {0};
+static Camera2D default_cam = {0};
 static cpVect gravity = { 0, 9.8 * 20. };
 static bool use_gravity = false;
 static cpBool lastClickState = cpFalse;
@@ -161,6 +162,13 @@ static void render_countour(RenderTexture2D *target, cpBody *b, Camera2D cam) {
     cpBodyEachShape(b, iter_shape_contor, NULL);
     EndMode2D();
     EndTextureMode();
+
+#if 1
+    Image img = LoadImageFromTexture(target->texture);
+    char fname[128] = {0};
+    sprintf(fname, "%p.png", b);
+    ExportImage(img, fname);
+#endif
 }
 
 static de_entity ClipPoly(cpSpace *space, cpShape *shape, cpVect n, cpFloat dist) {
@@ -198,6 +206,7 @@ static de_entity ClipPoly(cpSpace *space, cpShape *shape, cpVect n, cpFloat dist
     de_entity e = de_create(r);
     create_poly(e, space, r, clipped, clippedCount, transform);
     struct Component_Body* b = de_get(r, e, comp_body);
+    assert(b);
 
     cpBodySetPosition(b->b, centroid);
     cpBodySetVelocity(b->b, cpBodyGetVelocityAtWorldPoint(body, centroid));
@@ -206,6 +215,20 @@ static de_entity ClipPoly(cpSpace *space, cpShape *shape, cpVect n, cpFloat dist
     // Copy whatever properties you have set on the original shape that are important
     cpShapeSetFriction(b->shape, cpShapeGetFriction(shape));
     return e;
+}
+
+static RenderTexture2D clone_render_texture(RenderTexture2D src) {
+    RenderTexture2D dst = LoadRenderTexture(
+        src.texture.width, src.texture.height
+    );
+    Camera2D cam_local = {0};
+    cam_local.zoom = 1.;
+
+    BeginMode2D(cam_local);
+    BeginTextureMode(dst);
+    DrawTexture(src.texture, 0, 0, WHITE);
+    EndMode2D();
+    return dst;
 }
 
 static void
@@ -219,23 +242,32 @@ SliceShapePostStep(cpSpace *space, cpShape *shape, struct SliceContext *context)
 	cpVect n = cpvnormalize(cpvperp(cpvsub(b, a)));
 	cpFloat dist = cpvdot(a, n);
 	
-    de_entity e_new = de_null;
+    de_entity e_new1 = de_null, e_new2 = de_null;
 
 	cpBody *body = cpShapeGetBody(shape);
-	e_new = ClipPoly(space, shape, n, dist);
+	e_new1 = ClipPoly(space, shape, n, dist);
 
-    e_new = ptr2entt(body->userData);
-    struct Component_Textured *t = de_try_get(r, e_new, comp_textured);
+    de_entity e_old = ptr2entt(body->userData);
+    struct Component_Textured *t = de_try_get(r, e_old, comp_textured);
     if (t) {
-        Camera2D cam_local = {0};
-        BeginTextureMode(t->tex);
-        BeginMode2D(cam_local);
-        DrawCircle(1, 1, 1000, YELLOW);
+        trace("SliceShapePostStep: render to tex\n");
+        struct Component_Textured *t_new = de_emplace(r, e_new1, comp_textured);
+        t_new->tex = clone_render_texture(t->tex);
+        t_new->mask = clone_render_texture(t->mask);
+        BeginTextureMode(t_new->mask);
+
+        default_cam.offset = from_Vect(body->p);
+
+        BeginMode2D(default_cam);
+        render_countour(&t_new->mask, body, default_cam);
+        /*DrawTexture(t->mask.texture, 0, 0, YELLOW);*/
+        /*DrawCircle(1, 1, 1000, YELLOW);*/
         EndMode2D();
         EndTextureMode();
+
     }
 
-	e_new = ClipPoly(space, shape, cpvneg(n), -dist);
+	e_new2 = ClipPoly(space, shape, cpvneg(n), -dist);
 	
     cpSpaceRemoveShape(space, shape);
     cpSpaceRemoveBody(space, body);
@@ -343,10 +375,10 @@ de_entity create_char(
     e = de_create(r);
 
     struct Component_Textured *t = de_emplace(r, e, comp_textured);
-
     t->tex = bake_string(input, fnt.baseSize);
     t->mask = LoadRenderTexture(t->tex.texture.width, t->tex.texture.height);
     cpVect sz = { t->tex.texture.width, t->tex.texture.height };
+
     create_box(e, space, r, from_Vector2(pos), sz); 
     return e;
 }
@@ -363,6 +395,9 @@ static void create_cp(Stage_Splitter *st) {
 }
 
 static void _init(Stage_Splitter *st) {
+    memset(&cam, 0, sizeof(cam));
+    cam.zoom = 1.;
+
     st->r = de_ecs_make();
     create_cp(st);
     create_floor_and_walls(st);
@@ -467,6 +502,43 @@ void draw_chars(de_ecs *r, de_entity *ennts, int entts_num) {
 
 }
 
+static void debug_draw_masks(de_ecs *r) {
+    const Vector2 start_point = {
+        -2000, 0,
+    };
+    const float thick = 4.;
+
+    Vector2 point = start_point;
+    de_view_single v = de_create_view_single(r, comp_textured);
+    while (de_view_single_valid(&v)) {
+        struct Component_Textured *t = de_view_single_get(&v);
+        DrawTexture(t->tex.texture, point.x, point.y, WHITE);
+        DrawRectangleLinesEx(
+            (Rectangle) {
+                point.x, point.y, t->tex.texture.width, t->tex.texture.height,
+            },
+            thick, BLUE
+        );
+        DrawTexture(
+            t->mask.texture,
+            point.x,
+            point.y + t->tex.texture.height,
+            WHITE
+        );
+        DrawRectangleLinesEx(
+            (Rectangle) {
+                point.x, point.y + t->tex.texture.height,
+                t->tex.texture.width, t->tex.texture.height,
+            },
+            thick, BLUE
+        );
+
+        point.x += t->tex.texture.width + thick;
+
+        de_view_single_next(&v);
+    }
+}
+
 void splitter_draw(Stage_Splitter *st) {
     //trace("splitter_draw:\n");
     BeginDrawing();
@@ -474,20 +546,27 @@ void splitter_draw(Stage_Splitter *st) {
     BeginMode2D(cam);
 
     draw_chars(st->r, st->polygons, st->polygon_num);
+    debug_draw_masks(st->r);
 
     if (st->space)
         space_debug_draw(st->space, WHITE);
+
+    EndMode2D();
+
     const float thick = 4.;
     if(IsMouseButtonDown(MOUSE_BUTTON_LEFT)){
-        DrawLineEx(from_Vect(sliceStart), GetMousePosition(), thick, RED);
+        DrawLineEx(
+            from_Vect(sliceStart), 
+            GetScreenToWorld2D(GetMousePosition(), cam),
+            thick, RED
+        );
+        /*DrawLineEx(from_Vect(sliceStart), GetMousePosition(), thick, RED);*/
         trace(
             "splitter_draw: %s %s\n",
             Vector2_tostr(from_Vect(sliceStart)),
             Vector2_tostr(GetMousePosition())
         );
     }
-
-    EndMode2D();
     EndDrawing();
 }
 
@@ -597,7 +676,7 @@ int main(int argc, char **argv) {
     stage_add(stage_splitter_new(), "splitter");
     stage_subinit();
     stage_set_active("splitter", NULL);
-    cam.zoom = 1.;
+    default_cam.zoom = 1.;
     SetTargetFPS(60);
     while (!WindowShouldClose()) {
         stage_update_active();

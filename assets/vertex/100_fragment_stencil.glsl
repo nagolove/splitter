@@ -24,6 +24,6 @@ void main()
         col.a = 0.;
 
     gl_FragColor = col;
-    gl_FragColor = vec4(uv.x, uv.y, 1., 1.);
+    //gl_FragColor = vec4(uv.x, uv.y, 1., 1.);
 }
 

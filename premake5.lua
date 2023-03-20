@@ -85,8 +85,8 @@ workspace "ray_example"
         links('lua')
         --buildcommands("tl build")
         linkoptions {
-            "-fsanitize=address",
-            "-fsanitize-recover=address",
+            --"-fsanitize=address",
+            --"-fsanitize-recover=address",
         }
         buildoptions { 
             "-ggdb3",
