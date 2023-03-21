@@ -9,6 +9,7 @@
 #include "koh_routine.h"
 #include "koh_stages.h"
 #include "raylib.h"
+#include "raymath.h"
 #include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -150,9 +151,19 @@ static void iter_shape_contor(cpBody *body, cpShape *shape, void *data) {
     }
 
     DrawTriangleStrip(tri_strip, j - 1, GREEN);
+
+    trace("iter_shape_contour: ");
+    for (int i = 0; i < num; i++) {
+        trace("%d ", tri_strip[i]);
+    }
+    trace("\n");
+
+    cpBB bb = cpShapeGetBB(shape);
+    bb_draw(bb_world2local(body, bb), BLUE);
+    trace("iter_shape_contour: %s\n", bb_tostr(bb));
 }
 
-static void render_countour(RenderTexture2D *target, cpBody *b, Camera2D cam) {
+static void render_contour(RenderTexture2D *target, cpBody *b, Camera2D cam) {
     assert(b);
     assert(target);
 
@@ -231,6 +242,30 @@ static RenderTexture2D clone_render_texture(RenderTexture2D src) {
     return dst;
 }
 
+static void update_mask(
+    de_ecs *r, de_entity e_new, de_entity e_old, cpBody *body
+) {
+    struct Component_Textured *t = de_try_get(r, e_old, comp_textured);
+    if (t) {
+        trace("SliceShapePostStep: render to tex\n");
+        struct Component_Textured *t_new = de_emplace(r, e_new, comp_textured);
+        t_new->tex = clone_render_texture(t->tex);
+        t_new->mask = clone_render_texture(t->mask);
+        BeginTextureMode(t_new->mask);
+
+        /*default_cam.offset = from_Vect(body->p);*/
+
+        BeginMode2D(default_cam);
+        render_contour(&t_new->mask, body, default_cam);
+        /*DrawTexture(t->mask.texture, 0, 0, YELLOW);*/
+        /*DrawCircle(1, 1, 1000, YELLOW);*/
+        EndMode2D();
+        EndTextureMode();
+    } else {
+        trace("SliceShapePostStep: t == NULL\n");
+    }
+}
+
 static void
 SliceShapePostStep(cpSpace *space, cpShape *shape, struct SliceContext *context)
 {
@@ -248,26 +283,10 @@ SliceShapePostStep(cpSpace *space, cpShape *shape, struct SliceContext *context)
 	e_new1 = ClipPoly(space, shape, n, dist);
 
     de_entity e_old = ptr2entt(body->userData);
-    struct Component_Textured *t = de_try_get(r, e_old, comp_textured);
-    if (t) {
-        trace("SliceShapePostStep: render to tex\n");
-        struct Component_Textured *t_new = de_emplace(r, e_new1, comp_textured);
-        t_new->tex = clone_render_texture(t->tex);
-        t_new->mask = clone_render_texture(t->mask);
-        BeginTextureMode(t_new->mask);
-
-        default_cam.offset = from_Vect(body->p);
-
-        BeginMode2D(default_cam);
-        render_countour(&t_new->mask, body, default_cam);
-        /*DrawTexture(t->mask.texture, 0, 0, YELLOW);*/
-        /*DrawCircle(1, 1, 1000, YELLOW);*/
-        EndMode2D();
-        EndTextureMode();
-
-    }
+    update_mask(r, e_new1, e_old, body);
 
 	e_new2 = ClipPoly(space, shape, cpvneg(n), -dist);
+    update_mask(r, e_new2, e_old, body);
 	
     cpSpaceRemoveShape(space, shape);
     cpSpaceRemoveBody(space, body);
@@ -502,10 +521,7 @@ void draw_chars(de_ecs *r, de_entity *ennts, int entts_num) {
 
 }
 
-static void debug_draw_masks(de_ecs *r) {
-    const Vector2 start_point = {
-        -2000, 0,
-    };
+static void debug_draw_textures_and_masks(de_ecs *r, Vector2 start_point) {
     const float thick = 4.;
 
     Vector2 point = start_point;
@@ -546,7 +562,7 @@ void splitter_draw(Stage_Splitter *st) {
     BeginMode2D(cam);
 
     draw_chars(st->r, st->polygons, st->polygon_num);
-    debug_draw_masks(st->r);
+    debug_draw_textures_and_masks(st->r, (Vector2) { -2000, -800, });
 
     if (st->space)
         space_debug_draw(st->space, WHITE);
@@ -568,6 +584,11 @@ void splitter_draw(Stage_Splitter *st) {
         );
     }
     EndDrawing();
+    draw_camera_axis(&cam, (struct CameraAxisDrawCtx) {
+        .color_offset = BLUE,
+        .color_target = RED,
+        .fnt_size = 25,
+    });
 }
 
 void splitter_reset(Stage_Splitter *st) {
@@ -591,6 +612,13 @@ void splitter_update(Stage_Splitter *st) {
     /*trace("splitter_update:\n");*/
     if (IsKeyPressed(KEY_ESCAPE)) {
         CloseWindow();
+    }
+
+    if (IsKeyPressed(KEY_C)) {
+        trace("splitter_update: cam reset\n");
+        cam.offset = Vector2Zero();
+        cam.target = Vector2Zero();
+        cam.zoom = 1.;
     }
 
     if (IsKeyPressed(KEY_R)) {
