@@ -212,11 +212,11 @@ static void iter_shape_contour(cpBody *body, cpShape *shape, void *data) {
     _cam.offset = (Vector2) { bb_rect.width / 2., bb_rect.height / 2. };
     BeginMode2D(_cam);
 
-    DrawTriangleStrip(tri_strip, j - 1, GREEN);
+    DrawTriangleStrip(tri_strip, j - 1, random_raylib_color());
 
     trace("iter_shape_contour: %p\n", body);
     trace("iter_shape_contour: shapeList %p\n", body->shapeList);
-    for (int i = 0; i < num; i++) {
+    for (i = 0; i < num; i++) {
         trace("%d ", tri_strip[i]);
     }
     trace("\n");
@@ -351,7 +351,7 @@ static void update_mask(
     /*default_cam.offset = from_Vect(body->p);*/
 
     Camera2D _cam = {0};
-    _cam.zoom = 0.5;
+    _cam.zoom = 0.8;
     BeginMode2D(_cam);
     render_contour(&t_new->mask, body);
     /*DrawTexture(t->mask.texture, 0, 0, YELLOW);*/
