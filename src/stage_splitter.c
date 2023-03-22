@@ -7,6 +7,7 @@
 #include "koh_console.h"
 #include "koh_destral_ecs.h"
 #include "koh_dev_draw.h"
+#include "koh_hotkey.h"
 #include "koh_logger.h"
 #include "koh_object.h"
 #include "koh_render.h"
@@ -15,9 +16,14 @@
 #include "koh_stages.h"
 #include "raylib.h"
 #include "raymath.h"
+#include "stage_splitter.h"
 #include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
+
+enum {
+    HOTKEY_GROUP_SPLITTER = 0b0000100,
+};
 
 static Camera2D cam = {0};
 static Camera2D default_cam = {0};
@@ -202,7 +208,7 @@ static void iter_shape_contour(cpBody *body, cpShape *shape, void *data) {
 
     Camera2D _cam = {0};
     Rectangle bb_rect = from_bb(cpShapeGetBB(shape));
-    _cam.zoom = 1.;
+    _cam.zoom = .5;
     _cam.offset = (Vector2) { bb_rect.width / 2., bb_rect.height / 2. };
     BeginMode2D(_cam);
 
@@ -239,28 +245,11 @@ static void render_contour(RenderTexture2D *target, cpBody *b) {
 
     BeginTextureMode(*target);
 
-    /*BeginMode2D(_cam);*/
+    //BeginMode2D(_cam);
     ClearBackground(WHITE);
-    trace("render_contour: b->shape_num %d\n", b->shape_num);
-    //assert(b->shape_num == 1);
-    
-    trace("body %p\n", b);
-    cpShape *shape = b->shapeList;
-    trace("shape %p\n", shape);
-    int i = 0;
-    while(shape){
-        cpShape *next = shape->next;
-        i++;
-        shape = next;
-    }
-    
-    trace("render_contour: shape num = %d\n", i);
-
-    shape = b->shapeList;
-    trace("shape %p\n", shape);
 
     cpBodyEachShape(b, iter_shape_contour, NULL);
-    /*EndMode2D();*/
+    //EndMode2D();
     EndTextureMode();
 
 #if 1
@@ -361,7 +350,9 @@ static void update_mask(
 
     /*default_cam.offset = from_Vect(body->p);*/
 
-    BeginMode2D(default_cam);
+    Camera2D _cam = {0};
+    _cam.zoom = 0.5;
+    BeginMode2D(_cam);
     render_contour(&t_new->mask, body);
     /*DrawTexture(t->mask.texture, 0, 0, YELLOW);*/
     /*DrawCircle(1, 1, 1000, YELLOW);*/
@@ -506,6 +497,10 @@ de_entity create_char(
     cpVect sz = { t->tex.texture.width, t->tex.texture.height };
 
     create_box(e, space, r, from_Vector2(abs_pos), sz); 
+    struct Component_Body *b = de_try_get(r, e, comp_body);
+    assert(b);
+
+    render_contour(&t->mask, b->b);
     return e;
 }
 
@@ -533,6 +528,10 @@ static void _init(Stage_Splitter *st) {
     push_entt(st, create_char(st->space, st->r, "J", (Vector2) { 200, 600, }));
 }
 
+static void hk_remove_body(Hotkey *hk) {
+    trace("hk_remove_body:\n");
+}
+
 static void splitter_init(Stage_Splitter *st) {
     trace("splitter_init:\n");
 
@@ -544,6 +543,19 @@ static void splitter_init(Stage_Splitter *st) {
     cam.zoom = 1.;
     default_cam.zoom = 1.;
 
+    assert(st->parent.data);
+    struct SplitterCtx *ctx = st->parent.data;
+    hotkey_register(ctx->hk_store, (Hotkey) {
+        .name = "remove",
+        .description = "Удалить объект под курсором мыши.",
+        .func = hk_remove_body,
+        .data = NULL,
+        .groups = HOTKEY_GROUP_SPLITTER,
+        .combo = {
+            .mode = HM_MODE_ISKEYDOWN,
+            .key = KEY_X,
+        },
+    });
 }
 
 static void iter_shape_free(cpBody *body, cpShape *shape, void *data) {
@@ -663,7 +675,7 @@ void splitter_draw(Stage_Splitter *st) {
     BeginMode2D(cam);
 
     draw_chars(st->r, st->polygons, st->polygon_num);
-    debug_draw_textures_and_masks(st->r, (Vector2) { -2000, -800, });
+    debug_draw_textures_and_masks(st->r, (Vector2) { -2000, -1100, });
 
     if (st->space)
         space_debug_draw(st->space, WHITE);
