@@ -1,3 +1,7 @@
+#if defined(PLATFORM_WEB)
+#include <emscripten/emscripten.h>
+#endif
+
 #include "chipmunk/chipmunk.h"
 #include "chipmunk/chipmunk_types.h"
 #include "chipmunk/cpVect.h"
@@ -19,14 +23,30 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+HotkeyStorage hk_store = {0};
+
+static void update() {
+    hotkey_process(&hk_store);
+    stage_update_active();
+    console_check_editor_mode();
+    console_update();
+    dev_draw_draw();
+}
+
 int main(int argc, char **argv) {
-    SetConfigFlags(FLAG_FULLSCREEN_MODE | FLAG_MSAA_4X_HINT);
     SetExitKey(KEY_NULL);
+
+#if defined(PLATFORM_WEB)
+    SetConfigFlags(FLAG_MSAA_4X_HINT);
+    InitWindow(1920, 1080, "splitter");
+#else
+    SetConfigFlags(FLAG_FULLSCREEN_MODE | FLAG_MSAA_4X_HINT);
     InitWindow(1920 * 2, 1080 * 2, "splitter");
+#endif
+
     logger_init();
     sc_init();
 
-    HotkeyStorage hk_store = {0};
     hotkey_init(&hk_store);
 
     console_init(&hk_store, &(struct ConsoleSetup) { 
@@ -57,15 +77,13 @@ int main(int argc, char **argv) {
 
     stage_splitter_test();
 
+#if defined(PLATFORM_WEB)
+    emscripten_set_main_loop(update, 60, 1);
+#else
     while (!WindowShouldClose()) {
-        hotkey_process(&hk_store);
-
-        stage_update_active();
-
-        console_check_editor_mode();
-        console_update();
-        dev_draw_draw();
+        update(&hk_store);
     }
+#endif
     stage_shutdown_all();
 
     dev_draw_shutdown();

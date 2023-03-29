@@ -577,7 +577,12 @@ static void free_bodies(Stage_Splitter *st) {
 static void _shutdown(Stage_Splitter *st) {
     free_bodies(st);
     if (st->space) {
-        space_shutdown(st->space, true, true, true);
+        space_shutdown((struct SpaceShutdownCtx) {
+            .space = st->space,
+            .free_bodies = true,
+            .free_shapes = true,
+            .free_constraints = true,
+        });
         cpSpaceFree(st->space);
         st->space = NULL;
     }
@@ -854,7 +859,12 @@ void stage_splitter_test() {
 
     de_ecs_destroy(ecs);
 
-    space_shutdown(space, true, true, true);
+    space_shutdown((struct SpaceShutdownCtx) {
+        .space = space, 
+        .free_bodies = true, 
+        .free_shapes = true,
+        .free_constraints = true,
+    });
     cpSpaceFree(space);
 #endif
 }
