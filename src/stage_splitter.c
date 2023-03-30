@@ -20,13 +20,13 @@
 #include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include "rlgl.h"
 
 enum {
     HOTKEY_GROUP_SPLITTER = 0b0000100,
 };
 
 static Camera2D cam = {0};
-static Camera2D default_cam = {0};
 static cpVect gravity = { 0, 9.8 * 20. };
 static bool use_gravity = false;
 static cpBool lastClickState = cpFalse;
@@ -35,14 +35,17 @@ static Font fnt = {0};
 static bool is_paused = false;
 static Shader shdr_mask = {0};
 static int loc_mask_tex = 0;
+static bool is_show_textures = true;
+
+static Texture2D tex_example = {0};
 
 #define GRABBABLE_MASK_BIT (1<<31)
 static cpShapeFilter GRAB_FILTER = {
     CP_NO_GROUP, GRABBABLE_MASK_BIT, GRABBABLE_MASK_BIT
 };
-static cpShapeFilter NOT_GRABBABLE_FILTER = {
-    CP_NO_GROUP, ~GRABBABLE_MASK_BIT, ~GRABBABLE_MASK_BIT
-};
+//static cpShapeFilter NOT_GRABBABLE_FILTER = {
+    //CP_NO_GROUP, ~GRABBABLE_MASK_BIT, ~GRABBABLE_MASK_BIT
+//};
 
 #define DENSITY (1.0/10000.0)
 #define MAX_ENTITIES    256
@@ -72,14 +75,14 @@ struct Component_Textured {
 
 static void _init(Stage_Splitter *st);
 static void _shutdown(Stage_Splitter *st);
+static void on_destroy_textured(void *payload, de_entity e);
+static void slice(cpSpace *space, cpVect from, cpVect to);
 
 static de_cp_type comp_body = {
     .cp_id = 1,
     .cp_sizeof = sizeof(struct Component_Body),
     .name = "body",
 };
-
-void on_destroy_textured(void *payload, de_entity e);
 
 static de_cp_type comp_textured = {
     .cp_id = 2,
@@ -208,7 +211,7 @@ static void iter_shape_contour(cpBody *body, cpShape *shape, void *data) {
 
     Camera2D _cam = {0};
     Rectangle bb_rect = from_bb(cpShapeGetBB(shape));
-    _cam.zoom = .5;
+    _cam.zoom = 1.;
     _cam.offset = (Vector2) { bb_rect.width / 2., bb_rect.height / 2. };
     BeginMode2D(_cam);
 
@@ -351,7 +354,8 @@ static void update_mask(
     /*default_cam.offset = from_Vect(body->p);*/
 
     Camera2D _cam = {0};
-    _cam.zoom = 0.8;
+    //_cam.zoom = 0.8;
+    cam.zoom = 1.;
     BeginMode2D(_cam);
     render_contour(&t_new->mask, body);
     /*DrawTexture(t->mask.texture, 0, 0, YELLOW);*/
@@ -394,10 +398,15 @@ SliceShapePostStep(cpSpace *space, cpShape *shape, struct SliceContext *context)
             de_destroy(r, e);
         }
     }
+
+    free(context);
 }
 
 static void
-SliceQuery(cpShape *shape, cpVect point, cpVect normal, cpFloat alpha, struct SliceContext *context)
+SliceQuery(
+    cpShape *shape, cpVect point, cpVect normal, cpFloat alpha, 
+    struct SliceContext *context
+)
 {
     cpVect a = context->a;
     cpVect b = context->b;
@@ -418,7 +427,9 @@ SliceQuery(cpShape *shape, cpVect point, cpVect normal, cpFloat alpha, struct Sl
     if(cpShapePointQuery(shape, a, NULL) > 0.0f && cpShapePointQuery(shape, b, NULL) > 0.0f){
         // Can't modify the space during a query.
         // Must make a post-step callback to do the actual slicing.
-        cpSpaceAddPostStepCallback(context->space, (cpPostStepFunc)SliceShapePostStep, shape, context);
+        cpSpaceAddPostStepCallback(
+            context->space, (cpPostStepFunc)SliceShapePostStep, shape, context
+        );
     }
 }
 
@@ -451,7 +462,7 @@ static void create_floor_and_walls(Stage_Splitter *st) {
     cpSpaceAddShape(st->space, segment);
 }
 
-void push_entt(Stage_Splitter *st, de_entity e) {
+de_entity push_entt(Stage_Splitter *st, de_entity e) {
     assert(st);
     if (st->polygon_num < MAX_ENTITIES)
         st->polygons[st->polygon_num++] = e;
@@ -459,6 +470,7 @@ void push_entt(Stage_Splitter *st, de_entity e) {
         trace("push_entt: entities limit reached\n");
         exit(EXIT_FAILURE);
     }
+    return e;
 }
 
 RenderTexture2D bake_string(const char *input, int basesize) {
@@ -485,6 +497,8 @@ RenderTexture2D bake_string(const char *input, int basesize) {
 de_entity create_char(
     cpSpace *space, de_ecs *r, const char *input, Vector2 abs_pos
 ) {
+    assert(space);
+    assert(r);
     assert(input);
     de_entity e = de_null;
 
@@ -515,17 +529,50 @@ static void create_cp(Stage_Splitter *st) {
     cpSpaceSetDamping(st->space, 0.9);
 }
 
+static void diagonal_slice(cpSpace *space, de_ecs *r, de_entity e) {
+    struct Component_Body *b = de_try_get(r, e, comp_body);
+    assert(b);
+
+    cpShape *shape = b->b->shapeList;
+    assert(shape->next == NULL);
+    //trace("diagonal_slice: %p, %p\n", shape, shape->next);
+    Rectangle rect = from_bb(cpShapeGetBB(shape));
+    cpVect half_abit = {
+        .x = rect.width / 2. + 10.,
+        .y = rect.height / 2. + 10.,
+    };
+    cpSpaceStep(space, 1 / 60.);
+    slice(space, cpvsub(b->b->p, half_abit), cpvadd(b->b->p, half_abit));
+    //cpSpaceStep(space, 1 / 60.);
+}
+
 static void _init(Stage_Splitter *st) {
     memset(&cam, 0, sizeof(cam));
-    cam.zoom = 1.;
+    cam.zoom = 0.6;
+    cam.offset = (Vector2) {
+        .x = 1733,
+        .y = 722,
+    };
 
     st->r = de_ecs_make();
     create_cp(st);
     create_floor_and_walls(st);
 
-    push_entt(st, create_char(st->space, st->r, "A", (Vector2) { 200, 100 }));
-    push_entt(st, create_char(st->space, st->r, "H", (Vector2) { 1200, 0 }));
-    push_entt(st, create_char(st->space, st->r, "J", (Vector2) { 200, 600, }));
+    de_entity e = de_null;
+
+    e = push_entt(st, create_char(st->space, st->r, "A", (Vector2) { 200, 100 }));
+    diagonal_slice(st->space, st->r, e);
+
+    e = push_entt(st, create_char(st->space, st->r, "H", (Vector2) { 1200, 0 }));
+    diagonal_slice(st->space, st->r, e);
+
+    e = push_entt(st, create_char(st->space, st->r, "J", (Vector2) { 200, 600, }));
+    diagonal_slice(st->space, st->r, e);
+}
+
+static void hk_show_textures(Hotkey *hk) {
+    trace("hk_show_textures:\n");
+    is_show_textures = !is_show_textures;
 }
 
 static void hk_remove_body(Hotkey *hk) {
@@ -535,27 +582,42 @@ static void hk_remove_body(Hotkey *hk) {
 static void splitter_init(Stage_Splitter *st) {
     trace("splitter_init:\n");
 
+    tex_example = LoadTexture("assets/uv.png");
+
     fnt = load_font_unicode("assets/fonts/VictorMono-Medium.ttf", 455);
     shdr_mask = LoadShader(NULL, "assets/vertex/100_fragment_stencil.glsl");
     loc_mask_tex = GetShaderLocation(shdr_mask, "mask_texture");
 
-    _init(st);
-    cam.zoom = 1.;
-    default_cam.zoom = 1.;
-
     assert(st->parent.data);
     struct SplitterCtx *ctx = st->parent.data;
+
     hotkey_register(ctx->hk_store, (Hotkey) {
         .name = "remove",
         .description = "Удалить объект под курсором мыши.",
         .func = hk_remove_body,
         .data = NULL,
+        .enabled = true,
         .groups = HOTKEY_GROUP_SPLITTER,
         .combo = {
-            .mode = HM_MODE_ISKEYDOWN,
+            .mode = HM_MODE_ISKEYPRESSED,
             .key = KEY_X,
         },
     });
+
+    hotkey_register(ctx->hk_store, (Hotkey) {
+        .name = "show_textures",
+        .description = "Включить или выключить текстуры на геометрии",
+        .func = hk_show_textures,
+        .data = NULL,
+        .enabled = true,
+        .groups = HOTKEY_GROUP_SPLITTER,
+        .combo = {
+            .mode = HM_MODE_ISKEYPRESSED,
+            .key = KEY_T,
+        },
+    });
+
+    _init(st);
 }
 
 static void iter_shape_free(cpBody *body, cpShape *shape, void *data) {
@@ -599,6 +661,7 @@ void splitter_shutdown(Stage_Splitter *st) {
 
     UnloadFont(fnt);
     UnloadShader(shdr_mask);
+    UnloadTexture(tex_example);
 }
 
 void draw_chars(de_ecs *r, de_entity *ennts, int entts_num) {
@@ -625,13 +688,15 @@ void draw_chars(de_ecs *r, de_entity *ennts, int entts_num) {
             t->tex.texture.height / 2.,
         };
 
-        SetShaderValueTexture(shdr_mask, loc_mask_tex, t->mask.texture);
-        BeginShaderMode(shdr_mask);
-        render_texture_t(
-            t->tex.texture, src, dst, origin, RAD2DEG * b->b->a,
-            WHITE, t->tr
-        );
-        EndShaderMode();
+        if (is_show_textures && t->mask.texture.id && t->tex.texture.id) {
+            SetShaderValueTexture(shdr_mask, loc_mask_tex, t->mask.texture);
+            BeginShaderMode(shdr_mask);
+            render_texture_t(
+                t->tex.texture, src, dst, origin, RAD2DEG * b->b->a,
+                WHITE, t->tr
+            );
+            EndShaderMode();
+        }
         DrawCircle(b->b->p.x, b->b->p.y, 10, BLUE);
 
         de_view_next(&view);
@@ -673,6 +738,28 @@ static void debug_draw_textures_and_masks(de_ecs *r, Vector2 start_point) {
     }
 }
 
+void slice_draw() {
+    const float thick = 4.;
+
+    if(!IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+        return;
+
+    DrawLineEx(
+        from_Vect(sliceStart), 
+        GetScreenToWorld2D(GetMousePosition(), cam),
+        thick, RED
+    );
+}
+
+static void example_draw() {
+    rlBegin(RL_TRIANGLES);
+
+    //rlVertex2f();
+    //rlTexCoord();
+
+    rlEnd();
+}
+
 void splitter_draw(Stage_Splitter *st) {
     //trace("splitter_draw:\n");
     BeginDrawing();
@@ -685,23 +772,9 @@ void splitter_draw(Stage_Splitter *st) {
     if (st->space)
         space_debug_draw(st->space, WHITE);
 
+    slice_draw();
     EndMode2D();
 
-    const float thick = 4.;
-    if(IsMouseButtonDown(MOUSE_BUTTON_LEFT)){
-        DrawLineEx(
-            from_Vect(sliceStart), 
-            GetScreenToWorld2D(GetMousePosition(), cam),
-            thick, RED
-        );
-        /*DrawLineEx(from_Vect(sliceStart), GetMousePosition(), thick, RED);*/
-        trace(
-            "splitter_draw: %s %s\n",
-            Vector2_tostr(from_Vect(sliceStart)),
-            Vector2_tostr(GetMousePosition())
-        );
-    }
-    EndDrawing();
     draw_camera_axis(&cam, (struct CameraAxisDrawCtx) {
         .color_offset = BLUE,
         .color_target = RED,
@@ -711,6 +784,10 @@ void splitter_draw(Stage_Splitter *st) {
     //console_buf_write_c(WHITE, "sliceStart %s", cpVect_tostr(sliceStart));
     console_write("sliceStart %s", cpVect_tostr(sliceStart));
     console_write("cam %s", camera2str(cam));
+
+    example_draw();
+
+    EndDrawing();
 }
 
 void splitter_reset(Stage_Splitter *st) {
@@ -733,6 +810,26 @@ static void camera_process_mouse_wheel(Camera2D *cam) {
 static void xxx_draw_slice(void *udata) {
     struct SliceContext *ctx = udata;
     DrawLineV(from_Vect(ctx->a), from_Vect(ctx->b), BLUE);
+}
+
+static void slice(cpSpace *space, cpVect from, cpVect to) {
+    struct SliceContext *context = malloc(sizeof(*context));
+    context->a = from;
+    context->b = to;
+    context->space = space;
+
+    dev_draw_push(xxx_draw_slice, context, sizeof(*context));
+    trace(
+        "splitter_update: from %s to %s\n",
+        cpVect_tostr(context->a),
+        cpVect_tostr(context->b)
+    );
+
+    cpSpaceSegmentQuery(
+        space, from, to, 0.0, GRAB_FILTER, 
+        (cpSpaceSegmentQueryFunc)SliceQuery, context
+    );
+
 }
 
 void splitter_update(Stage_Splitter *st) {
@@ -792,20 +889,7 @@ void splitter_update(Stage_Splitter *st) {
         } else {
             Vector2 world_pos = GetScreenToWorld2D(GetMousePosition(), cam);
             cpVect mouse_pos = from_Vector2(world_pos);
-            struct SliceContext context = {sliceStart, mouse_pos, st->space};
-            trace(
-                "splitter_update: from %s to %s\n",
-                cpVect_tostr(context.a),
-                cpVect_tostr(context.b)
-            );
-
-            dev_draw_push(xxx_draw_slice, &context, sizeof(context));
-
-            cpSpaceSegmentQuery(
-                st->space, sliceStart, mouse_pos, 
-                0.0, GRAB_FILTER, (cpSpaceSegmentQueryFunc)SliceQuery, 
-                &context
-            );
+            slice(st->space, sliceStart, mouse_pos);
         }
 
         lastClickState = IsMouseButtonDown(MOUSE_BUTTON_LEFT);

@@ -81,7 +81,7 @@ int main(int argc, char **argv) {
     emscripten_set_main_loop(update, 60, 1);
 #else
     while (!WindowShouldClose()) {
-        update(&hk_store);
+        update();
     }
 #endif
     stage_shutdown_all();
